@@ -6,9 +6,13 @@ This is a custom fork of Cline with encoding detection logging for debugging Chi
 
 When using Qwen models in Cline, Chinese text sometimes appears in responses unexpectedly.
 
-**Hypothesis**: When Cline reads files using `@mention`, the `chardet` library may misdetect file encoding (e.g., detecting Korean EUC-KR files as Chinese GB2312). This causes garbled Chinese characters to be included in the model context, leading the model to respond in Chinese.
+**Hypothesis**: When Cline reads files, the `chardet` library may misdetect file encoding (e.g., detecting Korean EUC-KR files as Chinese GB2312). This causes garbled Chinese characters to be included in the model context, leading the model to respond in Chinese.
 
 ## Data Flow
+
+Encoding detection is triggered in **two scenarios**:
+
+### 1. User @mention (manual file reference)
 
 ```
 User input: "@/some_file.txt analyze this"
@@ -23,19 +27,45 @@ User input: "@/some_file.txt analyze this"
         extractTextFromFile() [extract-text.ts]
                     │
                     ▼
-        detectEncoding() ──► chardet.detect()
-                    │              │
-                    │              ▼
-                    │     Encoding detected (e.g., "GB2312")
-                    │              │
-                    ▼              ▼
+        detectEncoding() ──► chardet.detect()  ← LOGGING POINT
+                    │
+                    ▼
         iconv.decode(buffer, encoding)
                     │
                     ▼
         Decoded text included in model context
+```
+
+### 2. Cline read_file tool (automatic file reading)
+
+```
+Cline decides to read a file automatically
                     │
                     ▼
-        Model sees Chinese characters → responds in Chinese
+        ReadFileToolHandler.execute() [ReadFileToolHandler.ts:166]
+                    │
+                    ▼
+        extractFileContent() [extract-file-content.ts:44]
+                    │
+                    ▼
+        callTextExtractionFunctions() [extract-text.ts:133]
+                    │
+                    ▼
+        detectEncoding() ──► chardet.detect()  ← LOGGING POINT
+                    │
+                    ▼
+        iconv.decode(buffer, encoding)
+                    │
+                    ▼
+        Decoded text included in model context
+```
+
+### Result
+
+Both paths converge at `detectEncoding()`, so **all file reads are logged** when suspicious encoding is detected.
+
+```
+Model sees Chinese characters → responds in Chinese
 ```
 
 ## Changes Made
