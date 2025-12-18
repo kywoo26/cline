@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs"
+import * as fsSync from "fs"
 import fs from "fs/promises"
 import * as iconv from "iconv-lite"
 import { isBinaryFile } from "isbinaryfile"
@@ -8,12 +9,120 @@ import * as path from "path"
 // @ts-ignore-next-line
 import pdf from "pdf-parse/lib/pdf-parse"
 
-export async function detectEncoding(fileBuffer: Buffer, fileExtension?: string): Promise<string> {
+// ============================================================
+// Encoding Debug Logger (Rolling Log)
+// ============================================================
+const ENCODING_LOG_DIR = "D:/cline_encoding_debug"
+const ENCODING_LOG_PREFIX = "encoding"
+const MAX_LOG_FILES = 5
+const MAX_LOG_SIZE = 2 * 1024 * 1024 // 2MB
+
+function ensureLogDir() {
+	if (!fsSync.existsSync(ENCODING_LOG_DIR)) {
+		fsSync.mkdirSync(ENCODING_LOG_DIR, { recursive: true })
+	}
+}
+
+function getLogFiles(): string[] {
+	ensureLogDir()
+	return fsSync
+		.readdirSync(ENCODING_LOG_DIR)
+		.filter((f) => f.startsWith(ENCODING_LOG_PREFIX) && f.endsWith(".log"))
+		.sort()
+}
+
+function getCurrentLogFile(): string {
+	const files = getLogFiles()
+	if (files.length === 0) {
+		return path.join(ENCODING_LOG_DIR, `${ENCODING_LOG_PREFIX}_001.log`)
+	}
+
+	const latestFile = path.join(ENCODING_LOG_DIR, files[files.length - 1])
+	try {
+		const stats = fsSync.statSync(latestFile)
+		if (stats.size >= MAX_LOG_SIZE) {
+			// Need to create new file
+			const nextNum = files.length + 1
+			if (nextNum > MAX_LOG_FILES) {
+				// Delete oldest file
+				fsSync.unlinkSync(path.join(ENCODING_LOG_DIR, files[0]))
+			}
+			const newNum = Math.min(nextNum, MAX_LOG_FILES)
+			return path.join(ENCODING_LOG_DIR, `${ENCODING_LOG_PREFIX}_${String(newNum).padStart(3, "0")}.log`)
+		}
+	} catch (e) {
+		// File doesn't exist, will create new
+	}
+	return latestFile
+}
+
+function rotateIfNeeded() {
+	const files = getLogFiles()
+	if (files.length > MAX_LOG_FILES) {
+		// Delete old files
+		const toDelete = files.slice(0, files.length - MAX_LOG_FILES)
+		toDelete.forEach((f) => {
+			try {
+				fsSync.unlinkSync(path.join(ENCODING_LOG_DIR, f))
+			} catch (e) {}
+		})
+	}
+}
+
+// Suspicious encodings that may indicate misdetection
+const SUSPICIOUS_ENCODINGS = ["GB2312", "GB18030", "Big5", "GBK", "EUC-KR", "EUC-JP", "ISO-2022-JP", "ISO-2022-KR", "HZ-GB-2312"]
+const SAFE_ENCODINGS = ["utf-8", "UTF-8", "ascii", "ASCII", "utf8", "UTF8"]
+
+function shouldLogEncoding(detected: any, finalEncoding: string): boolean {
+	const confidence = detected?.confidence ?? 1
+	// Log if: suspicious encoding, low confidence, or non-UTF8/ASCII
+	return (
+		SUSPICIOUS_ENCODINGS.some((e) => finalEncoding.toUpperCase().includes(e.toUpperCase())) ||
+		confidence < 0.9 ||
+		!SAFE_ENCODINGS.some((e) => finalEncoding.toUpperCase() === e.toUpperCase())
+	)
+}
+
+function logEncoding(
+	filePath: string,
+	detected: any,
+	finalEncoding: string,
+	bufferSize: number,
+	firstBytes: string,
+	decodedPreview?: string,
+) {
+	try {
+		ensureLogDir()
+		rotateIfNeeded()
+
+		const logFile = getCurrentLogFile()
+		const timestamp = new Date().toISOString()
+		const logEntry = {
+			timestamp,
+			filePath,
+			detected,
+			finalEncoding,
+			bufferSize,
+			firstBytes,
+			decodedPreview,
+		}
+		fsSync.appendFileSync(logFile, JSON.stringify(logEntry) + "\n")
+	} catch (e) {
+		// Ignore logging failures
+	}
+}
+// ============================================================
+
+export async function detectEncoding(fileBuffer: Buffer, fileExtension?: string, filePath?: string): Promise<string> {
 	const detected = chardet.detect(fileBuffer)
+	const firstBytes = fileBuffer.slice(0, 100).toString("hex")
+
+	let finalEncoding: string
+
 	if (typeof detected === "string") {
-		return detected
+		finalEncoding = detected
 	} else if (detected && (detected as any).encoding) {
-		return (detected as any).encoding
+		finalEncoding = (detected as any).encoding
 	} else {
 		if (fileExtension) {
 			const isBinary = await isBinaryFile(fileBuffer).catch(() => false)
@@ -21,8 +130,29 @@ export async function detectEncoding(fileBuffer: Buffer, fileExtension?: string)
 				throw new Error(`Cannot read text for file type: ${fileExtension}`)
 			}
 		}
-		return "utf8"
+		finalEncoding = "utf8"
 	}
+
+	// Only log suspicious cases (non-UTF8, low confidence, or Chinese/Korean encodings)
+	if (shouldLogEncoding(detected, finalEncoding)) {
+		// Include decoded preview for suspicious cases
+		let decodedPreview: string | undefined
+		try {
+			decodedPreview = iconv.decode(fileBuffer.slice(0, 500), finalEncoding).substring(0, 200)
+		} catch (e) {
+			decodedPreview = "(decode failed)"
+		}
+		logEncoding(
+			filePath || fileExtension || "unknown",
+			detected,
+			finalEncoding,
+			fileBuffer.length,
+			firstBytes,
+			decodedPreview,
+		)
+	}
+
+	return finalEncoding
 }
 
 export async function extractTextFromFile(filePath: string): Promise<string> {
