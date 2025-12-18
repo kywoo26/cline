@@ -12,7 +12,15 @@ import { main as generateHostBridgeClient } from "./generate-host-bridge-client.
 import { main as generateProtoBusSetup } from "./generate-protobus-setup.mjs"
 
 const require = createRequire(import.meta.url)
-const PROTOC = path.join(require.resolve("grpc-tools"), "../bin/protoc")
+// Use PROTOC_PATH environment variable (required for builds)
+// See ENCODING_DEBUG.md for setup instructions
+if (!process.env.PROTOC_PATH) {
+	console.error(chalk.red("Error: PROTOC_PATH environment variable is not set."))
+	console.error(chalk.yellow("Please set PROTOC_PATH to your protoc binary path."))
+	console.error(chalk.cyan("Example: export PROTOC_PATH=/usr/local/bin/protoc"))
+	process.exit(1)
+}
+const PROTOC = process.env.PROTOC_PATH
 
 const PROTO_DIR = path.resolve("proto")
 const TS_OUT_DIR = path.resolve("src/shared/proto")
